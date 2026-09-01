@@ -1,0 +1,25 @@
+---
+- name: SERVER | Check if server exists in AD
+  microsoft.ad.computer:
+    identity: "{{ server_name }}"
+    properties:
+      - DistinguishedName
+      - CanonicalName
+      - Enabled
+    state: query
+  register: server_info
+  run_once: true
+  when: server_exists | bool
+  ignore_errors: yes
+
+- name: SERVER | Parse server info
+  ansible.builtin.set_fact:
+    server_exists: "{{ server_info is not failed and server_info.msg is defined }}"
+    server_canonical: "{{ server_info.msg.CanonicalName | default('N/A') }}"
+    server_enabled: "{{ server_info.msg.Enabled | default(false) }}"
+  when: server_exists | bool
+
+- name: SERVER | Fail if server not found
+  ansible.builtin.fail:
+    msg: "Server '{{ server_name }}' not found in Active Directory"
+  when: not server_exists | bool

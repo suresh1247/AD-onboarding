@@ -1,0 +1,48 @@
+---
+- name: GROUP | Ensure PAM Groups OU exists
+  microsoft.ad.ou:
+    name: PAM-Groups
+    path: "{{ ou_base_dn }}"
+    description: "PAM security groups"
+    state: present
+  run_once: true
+  when: 
+    - not enable_dry_run | bool
+    - server_exists | bool
+
+- name: GROUP | Ensure PAM security group exists
+  microsoft.ad.group:
+    name: "{{ ad_group_name }}"
+    path: "OU=PAM-Groups,{{ ou_base_dn }}"
+    scope: global
+    category: security
+    description: "PAM group for {{ application_name }} ({{ server_type }} server)"
+    state: present
+  run_once: true
+  register: group_result
+  when: 
+    - not enable_dry_run | bool
+    - server_exists | bool
+
+- name: GROUP | Add opsintel user to PAM group
+  microsoft.ad.group:
+    name: "{{ ad_group_name }}"
+    members:
+      - "opsintel"
+    state: members
+  run_once: true
+  register: opsintel_result
+  when: 
+    - not enable_dry_run | bool
+    - server_exists | bool
+  changed_when: opsintel_result is changed
+
+- name: GROUP | Set facts for reporting
+  ansible.builtin.set_fact:
+    group_creation:
+      stdout: "{{ 'CREATED' if group_result.changed else 'EXISTS' }}"
+    opsintel_add:
+      stdout: "{{ 'ADDED' if opsintel_result.changed else 'ALREADY_MEMBER' }}"
+  when: 
+    - not enable_dry_run | bool
+    - server_exists | bool

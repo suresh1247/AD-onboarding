@@ -1,0 +1,33 @@
+---
+- name: REPORT | Calculate duration
+  ansible.builtin.set_fact:
+    operation_duration: "{{ (ansible_date_time.epoch | int - operation_start_time | int) }}"
+  when: server_exists | bool
+
+- name: REPORT | Final Status Report
+  ansible.builtin.debug:
+    msg:
+      - "=========================================="
+      - "✅ AD ONBOARDING COMPLETED"
+      - "=========================================="
+      - "Operation ID: {{ operation_id }}"
+      - "Duration: {{ operation_duration }} seconds"
+      - "Dry Run: {{ 'YES' if enable_dry_run else 'NO' }}"
+      - ""
+      - "Server: {{ server_name }}"
+      - "Domain: {{ domain_name }}"
+      - "Application: {{ application_name }}"
+      - "Server Type: {{ server_type }}"
+      - "Target OU: {{ target_ou_dn }}"
+      - ""
+      - "OU Status: {{ ou_creation.stdout }}"
+      - "PAM Group: {{ ad_group_name }} ({{ group_creation.stdout }})"
+      - "opsintel User: {{ opsintel_add.stdout }}"
+      - "GPO: {{ gpo_name }} ({{ gpo_creation.stdout }})"
+      - "GPO Link: {{ gpo_link.stdout }}"
+      - "Restricted Group: {{ restricted_group_config.stdout }}"
+      - "Verification: {{ verify_restricted_group.stdout }}"
+      - "Server Move: {{ 'YES' if server_moved | default(false) else 'NO' }}"
+      - "GPUpdate: {{ gpupdate_result.stdout }}"
+      - "=========================================="
+  when: server_exists | bool

@@ -1,0 +1,48 @@
+---
+- name: OU | Create OU hierarchy
+  microsoft.ad.ou:
+    name: "{{ item.name }}"
+    path: "{{ item.path }}"
+    description: "{{ item.desc }}"
+    state: present
+  loop:
+    - { name: "LKM", path: "{{ ou_base_dn }}", desc: "LKM Root OU" }
+    - { name: "Servers", path: "OU=LKM,{{ ou_base_dn }}", desc: "Server OUs" }
+  run_once: true
+  register: ou_results
+  when: 
+    - not enable_dry_run | bool
+    - server_exists | bool
+
+- name: OU | Create SQL OU if needed
+  microsoft.ad.ou:
+    name: SQL
+    path: "OU=Servers,OU=LKM,{{ ou_base_dn }}"
+    description: "SQL Server OU"
+    state: present
+  run_once: true
+  register: sql_ou_result
+  when: 
+    - server_type == "SQL" 
+    - not enable_dry_run | bool
+    - server_exists | bool
+
+- name: OU | Create application OU
+  microsoft.ad.ou:
+    name: "{{ application_name }}"
+    path: "{{ 'OU=SQL,OU=Servers,OU=LKM' if server_type == 'SQL' else 'OU=Servers,OU=LKM' }},{{ ou_base_dn }}"
+    description: "{{ application_name }} application servers"
+    state: present
+  run_once: true
+  register: app_ou_result
+  when: 
+    - not enable_dry_run | bool
+    - server_exists | bool
+
+- name: OU | Set fact for reporting
+  ansible.builtin.set_fact:
+    ou_creation:
+      stdout: "{{ 'CREATED' if app_ou_result.changed else 'EXISTS' }}"
+  when: 
+    - not enable_dry_run | bool
+    - server_exists | bool

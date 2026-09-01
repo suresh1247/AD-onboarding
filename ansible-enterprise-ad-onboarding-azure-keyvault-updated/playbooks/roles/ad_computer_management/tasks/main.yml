@@ -1,0 +1,9 @@
+---
+- name: SERVER | Include server check
+  ansible.builtin.include_tasks: check_server.yml
+
+- name: SERVER | Include server move
+  ansible.builtin.include_tasks: move_server.yml
+  when: 
+    - server_exists | bool
+    - not enable_dry_run | bool

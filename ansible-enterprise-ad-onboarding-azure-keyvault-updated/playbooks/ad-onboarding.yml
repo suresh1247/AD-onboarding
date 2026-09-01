@@ -1,0 +1,389 @@
+---
+- name: ENTERPRISE ACTIVE DIRECTORY ONBOARDING
+  hosts: domain_controllers
+  gather_facts: no
+  vars:
+    # Azure Key Vault Configuration
+    azure_rest_api_version: "7.0"
+    
+    # Default values
+    enable_dry_run: false
+    ad_retries: 3
+    ad_delay: 5
+    
+    # Operation tracking
+    operation_id: "{{ lookup('password', '/dev/null length=12 chars=hex') | upper }}"
+    operation_start_time: "{{ ansible_date_time.epoch }}"
+    
+    # Validation patterns
+    server_name_pattern: '^[A-Za-z][A-Za-z0-9-]{2,14}$'
+    app_name_pattern: '^[A-Za-z][A-Za-z0-9_]{2,30}$'
+    domain_name_pattern: '^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+    
+    # Base OU path
+    ou_base_dn: "DC={{ domain_name.replace('.', ',DC=') }}"
+    
+    # Reporting defaults
+    ou_creation: { stdout: "EXISTS" }
+    group_creation: { stdout: "EXISTS" }
+    opsintel_add: { stdout: "ALREADY_MEMBER" }
+    gpo_creation: { stdout: "EXISTS" }
+    gpo_link: { stdout: "ALREADY_LINKED" }
+    restricted_group_config: { stdout: "CONFIGURED" }
+    gpupdate_result: { stdout: "INITIATED" }
+    server_move: { stdout: "NOT_MOVED" }
+    verify_restricted_group: { stdout: "VERIFIED" }
+    
+    # Production hardened: Service Account
+    service_account_dn: "CN=svc-aap-automation,OU=Service Accounts,{{ ou_base_dn }}"
+
+  pre_tasks:
+    # ============================================
+    # 1. SAFETY: REQUIRED APPROVAL
+    # ============================================
+    - name: SAFETY | Require explicit approval before making AD changes
+      ansible.builtin.assert:
+        that:
+          - requester_confirmation | upper == 'YES'
+        fail_msg: |
+          ==========================================
+          ❌ CHANGE APPROVAL REQUIRED ❌
+          ==========================================
+          requester_confirmation must be YES
+          Current value: {{ requester_confirmation }}
+          ==========================================
+        success_msg: "✓ Change approval confirmed"
+      delegate_to: localhost
+      connection: local
+      run_once: true
+
+    # ============================================
+    # 2. AZURE KEY VAULT CREDENTIAL RETRIEVAL
+    # ============================================
+    - name: AZURE | Retrieve credentials from environment
+      ansible.builtin.set_fact:
+        keyvault_name: "{{ lookup('env', 'KEYVAULT_NAME') | default('') }}"
+        azure_client_id: "{{ lookup('env', 'AZURE_CLIENT_ID') | default('') }}"
+        azure_client_secret: "{{ lookup('env', 'AZURE_CLIENT_SECRET') | default('') }}"
+        azure_tenant_id: "{{ lookup('env', 'AZURE_TENANT_ID') | default('') }}"
+        azure_subscription_id: "{{ lookup('env', 'AZURE_SUBSCRIPTION_ID') | default('') }}"
+      no_log: true
+      delegate_to: localhost
+      connection: local
+      run_once: true
+
+    - name: AZURE | Validate Azure credentials
+      ansible.builtin.fail:
+        msg: |
+          ==========================================
+          ❌ AZURE CREDENTIALS NOT FOUND ❌
+          ==========================================
+          
+          Please ensure credential "Azure Service Principal" is added to the Job Template.
+          ==========================================
+      when: 
+        - keyvault_name == '' or azure_client_id == '' or azure_client_secret == '' 
+        - azure_tenant_id == '' or azure_subscription_id == ''
+      delegate_to: localhost
+      connection: local
+      run_once: true
+
+    - name: AZURE | Get Azure Access Token
+      ansible.builtin.uri:
+        url: "https://login.microsoftonline.com/{{ azure_tenant_id }}/oauth2/v2.0/token"
+        method: POST
+        body_format: form-urlencoded
+        body:
+          client_id: "{{ azure_client_id }}"
+          client_secret: "{{ azure_client_secret }}"
+          scope: "https://vault.azure.net/.default"
+          grant_type: "client_credentials"
+        validate_certs: yes
+        timeout: 30
+        status_code: 200
+      register: token_response
+      no_log: true
+      delegate_to: localhost
+      connection: local
+      run_once: true
+
+    - name: AZURE | Fail if token retrieval failed
+      ansible.builtin.fail:
+        msg: |
+          ==========================================
+          ❌ AZURE AUTHENTICATION FAILED ❌
+          ==========================================
+          Status: {{ token_response.status }}
+          Please verify Service Principal credentials and permissions.
+          ==========================================
+      when: token_response.status != 200
+      delegate_to: localhost
+      connection: local
+      run_once: true
+
+    - name: AZURE | Set access token
+      ansible.builtin.set_fact:
+        azure_access_token: "{{ token_response.json.access_token }}"
+      no_log: true
+      delegate_to: localhost
+      connection: local
+      run_once: true
+
+    - name: AZURE | Retrieve AD service account credentials from Key Vault
+      ansible.builtin.uri:
+        url: "https://{{ keyvault_name }}.vault.azure.net/secrets/{{ item }}?api-version={{ azure_rest_api_version }}"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ azure_access_token }}"
+        validate_certs: yes
+        timeout: 30
+        return_content: yes
+        status_code: 200
+      loop:
+        - "ad-service-account-username"
+        - "ad-service-account-password"
+        - "ad-domain-name"
+      register: ad_secret_result
+      no_log: true
+      delegate_to: localhost
+      connection: local
+      run_once: true
+
+    - name: AZURE | Set AD credentials (Service Account)
+      ansible.builtin.set_fact:
+        ad_username: "{{ (ad_secret_result.results | selectattr('item', 'equalto', 'ad-service-account-username') | first).json.value }}"
+        ad_password: "{{ (ad_secret_result.results | selectattr('item', 'equalto', 'ad-service-account-password') | first).json.value }}"
+        ad_domain_name: "{{ (ad_secret_result.results | selectattr('item', 'equalto', 'ad-domain-name') | first).json.value }}"
+      no_log: true
+      delegate_to: localhost
+      connection: local
+      run_once: true
+
+    - name: AZURE | Fail if AD credentials not retrieved
+      ansible.builtin.fail:
+        msg: |
+          ==========================================
+          ❌ AD SERVICE ACCOUNT CREDENTIALS NOT FOUND ❌
+          ==========================================
+          
+          Could not retrieve AD credentials from Key Vault: {{ keyvault_name }}
+          
+          Required secrets:
+          - ad-service-account-username
+          - ad-service-account-password
+          - ad-domain-name
+          ==========================================
+      when: 
+        - ad_username == '' or ad_password == '' or ad_domain_name == ''
+      delegate_to: localhost
+      connection: local
+      run_once: true
+
+    # ============================================
+    # 3. WINRM CONNECTION SETUP
+    # ============================================
+    - name: CONNECTION | Set WinRM connection variables
+      ansible.builtin.set_fact:
+        ansible_user: "{{ ad_username }}"
+        ansible_password: "{{ ad_password }}"
+        ansible_connection: winrm
+        ansible_winrm_transport: ntlm
+        ansible_winrm_server_cert_validation: ignore
+        ansible_port: 5985
+        ansible_winrm_operation_timeout_sec: 60
+        ansible_winrm_read_timeout_sec: 120
+        ansible_become_method: runas
+        ansible_become_user: SYSTEM
+      no_log: true
+
+    - name: CONNECTION | Gather facts from Windows host
+      ansible.builtin.setup:
+        gather_subset:
+          - min
+
+    - name: CONNECTION | Test connectivity
+      ansible.windows.win_ping:
+      register: ping_test
+      until: ping_test is success
+      retries: "{{ ad_retries }}"
+      delay: "{{ ad_delay }}"
+
+    - name: CONNECTION | Verify Active Directory module
+      ansible.windows.win_shell: |
+        Import-Module ActiveDirectory -ErrorAction Stop
+        Get-ADDomain | Select-Object DNSRoot
+      register: ad_verify
+      until: ad_verify is success
+      retries: "{{ ad_retries }}"
+      delay: "{{ ad_delay }}"
+      changed_when: false
+
+    # ============================================
+    # 4. INPUT VALIDATION
+    # ============================================
+    - name: VALIDATION | Validate required parameters
+      ansible.builtin.assert:
+        that:
+          - server_name is defined and server_name != ''
+          - application_name is defined and application_name != ''
+          - domain_name is defined and domain_name != ''
+        fail_msg: "Missing required parameters"
+        success_msg: "✓ Input validation passed"
+
+    - name: VALIDATION | Validate name formats
+      ansible.builtin.assert:
+        that:
+          - server_name is match(server_name_pattern)
+          - application_name is match(app_name_pattern)
+          - domain_name is match(domain_name_pattern)
+        fail_msg: "Invalid name format detected"
+        success_msg: "✓ Name format validation passed"
+
+    - name: VALIDATION | Check for dry run mode
+      ansible.builtin.debug:
+        msg: "⚠️ DRY RUN MODE ENABLED - No changes will be made"
+      when: enable_dry_run | bool
+
+    # ============================================
+    # 5. SERVER EXISTENCE CHECK
+    # ============================================
+    - name: SERVER | Search for server in Active Directory
+      ansible.windows.win_shell: |
+        Import-Module ActiveDirectory -ErrorAction SilentlyContinue
+        $Computer = Get-ADComputer -Filter "Name -eq '{{ server_name }}'" -Properties DistinguishedName, CanonicalName, Enabled -ErrorAction SilentlyContinue
+        if ($Computer) {
+            $Result = @{
+                Exists = $true
+                DN = $Computer.DistinguishedName
+                CanonicalName = $Computer.CanonicalName
+                Enabled = $Computer.Enabled
+            }
+            $Result | ConvertTo-Json
+        } else {
+            '{"Exists": false}'
+        }
+      register: server_search
+      changed_when: false
+
+    - name: SERVER | Parse server information
+      ansible.builtin.set_fact:
+        server_exists: "{{ (server_search.stdout | from_json).Exists | default(false) }}"
+        server_canonical: "{{ (server_search.stdout | from_json).CanonicalName | default('N/A') }}"
+        server_enabled: "{{ (server_search.stdout | from_json).Enabled | default(false) }}"
+
+    - name: SERVER | Display server status
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "SERVER: {{ server_name }}"
+          - "Exists in AD: {{ 'YES' if server_exists else 'NO' }}"
+          - "Location: {{ server_canonical }}"
+          - "Status: {{ 'Enabled' if server_enabled else 'Disabled' if server_exists else 'N/A' }}"
+          - "=========================================="
+
+    - name: SERVER | Stop playbook when server is not found in AD
+      ansible.builtin.fail:
+        msg: |
+          ==========================================
+          ❌ SERVER NOT FOUND ❌
+          ==========================================
+          Server '{{ server_name }}' was not found in Active Directory.
+          No changes will be made.
+          ==========================================
+      when: not server_exists | bool
+
+    # ============================================
+    # 6. DYNAMIC CONFIGURATION
+    # ============================================
+    - name: SERVER | Set dynamic configuration
+      ansible.builtin.set_fact:
+        server_type: "{{ 'SQL' if 'SQL' in server_name | upper else 'NON-SQL' }}"
+        target_ou_dn: >-
+          {{
+            ('OU=' + application_name + ',OU=SQL,OU=Servers,OU=LKM,' + ou_base_dn)
+            if ('SQL' in server_name | upper)
+            else ('OU=' + application_name + ',OU=Servers,OU=LKM,' + ou_base_dn)
+          }}
+        app_prefix: "{{ application_name[:3] | upper }}"
+        ad_group_name: "{{ application_name[:3] | upper }}-PAM-{{ application_name }}{{ 'SQL' if ('SQL' in server_name | upper) else '' }}"
+        gpo_name: "{{ application_name[:3] | upper }}-SRV-{{ application_name }}{{ 'SQL' if ('SQL' in server_name | upper) else '' }}"
+      when: server_exists | bool
+
+  tasks:
+    # ============================================
+    # 7. AD ONBOARDING EXECUTION
+    # ============================================
+    - name: MAIN | Execute AD onboarding
+      block:
+        - name: Include validation role
+          ansible.builtin.include_role:
+            name: ad_validation
+          when: 
+            - server_exists | bool
+            - not enable_dry_run | bool
+
+        - name: Include OU management role
+          ansible.builtin.include_role:
+            name: ad_ou_management
+          when: 
+            - server_exists | bool
+            - not enable_dry_run | bool
+
+        - name: Include computer management role
+          ansible.builtin.include_role:
+            name: ad_computer_management
+          when: 
+            - server_exists | bool
+            - not enable_dry_run | bool
+
+        - name: Include group management role
+          ansible.builtin.include_role:
+            name: ad_group_management
+          when: 
+            - server_exists | bool
+            - not enable_dry_run | bool
+
+        - name: Include GPO management role
+          ansible.builtin.include_role:
+            name: ad_gpo_management
+          when: 
+            - server_exists | bool
+            - not enable_dry_run | bool
+
+        - name: Include restricted groups role
+          ansible.builtin.include_role:
+            name: ad_restricted_groups
+          when: 
+            - server_exists | bool
+            - not enable_dry_run | bool
+
+        - name: Include reporting role
+          ansible.builtin.include_role:
+            name: ad_reporting
+          when: server_exists | bool
+
+      when: server_exists | bool
+      rescue:
+        - name: MAIN | Log failure
+          ansible.builtin.debug:
+            msg: "❌ AD Onboarding failed during execution"
+
+  post_tasks:
+    - name: REPORT | Server not found summary
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "❌ AD ONBOARDING CANCELLED"
+          - "=========================================="
+          - "Server: {{ server_name }}"
+          - "Status: Not Found in Active Directory"
+          - "=========================================="
+      when: not server_exists | bool
+
+    - name: AZURE | Session cleanup
+      ansible.builtin.debug:
+        msg: "✓ Azure session completed"
+      when: keyvault_name != ""
+      delegate_to: localhost
+      connection: local
+      run_once: true

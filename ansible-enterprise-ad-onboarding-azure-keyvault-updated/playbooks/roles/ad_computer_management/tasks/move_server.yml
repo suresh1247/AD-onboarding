@@ -1,0 +1,25 @@
+---
+- name: SERVER | Verify target OU exists by DN
+  microsoft.ad.ou:
+    identity: "{{ target_ou_dn }}"
+    state: query
+  register: ou_check
+  run_once: true
+  ignore_errors: yes
+
+- name: SERVER | Fail if target OU missing
+  ansible.builtin.fail:
+    msg: "Target OU '{{ target_ou_dn }}' does not exist"
+  when: ou_check is failed
+
+- name: COMPUTER | Move server to target OU
+  microsoft.ad.computer:
+    identity: "{{ server_name }}"
+    path: "{{ target_ou_dn }}"
+    state: present
+  register: server_move
+  changed_when: server_move is changed
+
+- name: COMPUTER | Set move fact
+  ansible.builtin.set_fact:
+    server_moved: "{{ server_move is changed }}"
