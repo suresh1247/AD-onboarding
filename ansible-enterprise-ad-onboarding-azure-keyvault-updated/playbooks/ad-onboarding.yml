@@ -201,18 +201,6 @@
       connection: local
       run_once: true
 
-    - name: AZURE | Display secret errors if any
-      ansible.builtin.debug:
-        msg: "Error retrieving {{ result.item }}: {{ result.content }}"
-      loop: "{{ ad_secret_result.results }}"
-      when: 
-        - ad_secret_result is defined
-        - ad_secret_result.results is defined
-        - result.status != 200
-      delegate_to: localhost
-      connection: local
-      run_once: true
-
     - name: AZURE | Set AD credentials (Service Account)
       ansible.builtin.set_fact:
         ad_username: "{{ (ad_secret_result.results | selectattr('item', 'equalto', 'ad-service-account-username') | first).json.value }}"
