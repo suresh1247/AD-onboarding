@@ -24,7 +24,7 @@
     - gpo_check.stdout is defined
     - gpo_check.stdout == "GPO_NOT_EXISTS"
 
-- name: GPO | Set creation fact
+- name: GPO | Set creation fact when GPO exists
   ansible.builtin.set_fact:
     gpo_creation:
       stdout: "EXISTS"
@@ -35,7 +35,7 @@
     - gpo_check.stdout is defined
     - gpo_check.stdout == "GPO_EXISTS"
 
-- name: GPO | Set creation fact for new GPO
+- name: GPO | Set creation fact when GPO is created
   ansible.builtin.set_fact:
     gpo_creation:
       stdout: "CREATED"
@@ -64,11 +64,10 @@
   when: 
     - not enable_dry_run | bool
     - server_exists | bool
-    - gpo_check is defined
-    - gpo_check.stdout is defined
-    - gpo_check.stdout == "GPO_EXISTS" or (gpo_create is defined and gpo_create.stdout == "GPO_CREATED")
+    - (gpo_check is defined and gpo_check.stdout is defined and gpo_check.stdout == "GPO_EXISTS") or 
+      (gpo_create is defined and gpo_create.stdout is defined and gpo_create.stdout == "GPO_CREATED")
 
-- name: GPO | Set link fact
+- name: GPO | Set link fact default
   ansible.builtin.set_fact:
     gpo_link:
       stdout: "ALREADY_LINKED"
