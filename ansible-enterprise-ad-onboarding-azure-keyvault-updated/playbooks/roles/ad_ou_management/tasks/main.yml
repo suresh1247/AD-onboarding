@@ -1,13 +1,21 @@
 ---
 - name: OU | Create OU hierarchy
-  microsoft.ad.ou:
-    name: "{{ item.name }}"
-    path: "{{ item.path }}"
-    description: "{{ item.desc }}"
-    state: present
-  loop:
-    - { name: "LKM", path: "{{ ou_base_dn }}", desc: "LKM Root OU" }
-    - { name: "Servers", path: "OU=LKM,{{ ou_base_dn }}", desc: "Server OUs" }
+  ansible.windows.win_shell: |
+    Import-Module ActiveDirectory -ErrorAction Stop
+    $OUs = @(
+        @{Name="LKM"; Path="{{ ou_base_dn }}"; Desc="LKM Root OU"},
+        @{Name="Servers"; Path="OU=LKM,{{ ou_base_dn }}"; Desc="Server OUs"}
+    )
+    foreach ($OU in $OUs) {
+        $OUPath = "OU=$($OU.Name),$($OU.Path)"
+        $OUExists = Get-ADOrganizationalUnit -Filter "DistinguishedName -eq '$OUPath'" -ErrorAction SilentlyContinue
+        if (-not $OUExists) {
+            New-ADOrganizationalUnit -Name $OU.Name -Path $OU.Path -Description $OU.Desc
+            Write-Output "CREATED:$($OU.Name)"
+        } else {
+            Write-Output "EXISTS:$($OU.Name)"
+        }
+    }
   run_once: true
   register: ou_results
   when: 
@@ -15,11 +23,16 @@
     - server_exists | bool
 
 - name: OU | Create SQL OU if needed
-  microsoft.ad.ou:
-    name: SQL
-    path: "OU=Servers,OU=LKM,{{ ou_base_dn }}"
-    description: "SQL Server OU"
-    state: present
+  ansible.windows.win_shell: |
+    Import-Module ActiveDirectory -ErrorAction Stop
+    $OUPath = "OU=SQL,OU=Servers,OU=LKM,{{ ou_base_dn }}"
+    $OUExists = Get-ADOrganizationalUnit -Filter "DistinguishedName -eq '$OUPath'" -ErrorAction SilentlyContinue
+    if (-not $OUExists) {
+        New-ADOrganizationalUnit -Name "SQL" -Path "OU=Servers,OU=LKM,{{ ou_base_dn }}" -Description "SQL Server OU"
+        Write-Output "CREATED"
+    } else {
+        Write-Output "EXISTS"
+    }
   run_once: true
   register: sql_ou_result
   when: 
@@ -28,11 +41,17 @@
     - server_exists | bool
 
 - name: OU | Create application OU
-  microsoft.ad.ou:
-    name: "{{ application_name }}"
-    path: "{{ 'OU=SQL,OU=Servers,OU=LKM' if server_type == 'SQL' else 'OU=Servers,OU=LKM' }},{{ ou_base_dn }}"
-    description: "{{ application_name }} application servers"
-    state: present
+  ansible.windows.win_shell: |
+    Import-Module ActiveDirectory -ErrorAction Stop
+    $OUPath = "{{ target_ou_dn }}"
+    $OUExists = Get-ADOrganizationalUnit -Filter "DistinguishedName -eq '$OUPath'" -ErrorAction SilentlyContinue
+    if (-not $OUExists) {
+        $ParentPath = "{{ 'OU=SQL,OU=Servers,OU=LKM' if server_type == 'SQL' else 'OU=Servers,OU=LKM' }},{{ ou_base_dn }}"
+        New-ADOrganizationalUnit -Name "{{ application_name }}" -Path $ParentPath -Description "{{ application_name }} application servers"
+        Write-Output "CREATED"
+    } else {
+        Write-Output "EXISTS"
+    }
   run_once: true
   register: app_ou_result
   when: 
@@ -42,7 +61,7 @@
 - name: OU | Set fact for reporting
   ansible.builtin.set_fact:
     ou_creation:
-      stdout: "{{ 'CREATED' if app_ou_result.changed else 'EXISTS' }}"
+      stdout: "{{ 'CREATED' if app_ou_result.stdout == 'CREATED' else 'EXISTS' }}"
   when: 
     - not enable_dry_run | bool
     - server_exists | bool
