@@ -1,135 +1,53 @@
 ---
 # Role: ad_gpo_management
-# Purpose: Create and link GPOs
+# Purpose: Create and link GPO with proper status tracking
 
-- name: GPO | Create new GPO
+- name: GPO | Set GPO name
+  ansible.builtin.set_fact:
+    gpo_name: >-
+      {{
+        (app_prefix + '-SRV-' + application_name + 'SQL')
+        if server_type == 'SQL'
+        else (app_prefix + '-SRV-' + application_name)
+      }}
+
+- name: GPO | Display GPO name
+  ansible.builtin.debug:
+    msg: "Managing GPO: {{ gpo_name }}"
+
+- name: GPO | Create GPO if not exists
   ansible.windows.win_shell: |
     Import-Module GroupPolicy -ErrorAction Stop
-    
     $GPOName = "{{ gpo_name }}"
-    $GPOExists = Get-GPO -Name $GPOName -ErrorAction SilentlyContinue
-    
-    if ($GPOExists) {
-        Write-Output "GPO_ALREADY_EXISTS"
+    $ExistingGPO = Get-GPO -Name $GPOName -ErrorAction SilentlyContinue
+    if ($ExistingGPO) {
+        Write-Output "EXISTS"
     } else {
-        New-GPO -Name $GPOName -Comment "GPO for {{ application_name }} server security settings"
-        Write-Output "GPO_CREATED"
+        New-GPO -Name $GPOName -Comment "GPO for {{ application_name }} ({{ server_type }} server)"
+        Write-Output "CREATED"
     }
-  register: gpo_create
-  run_once: true
-  when: 
-    - not enable_dry_run | bool
-    - server_exists | bool
+  when: not enable_dry_run
+  register: gpo_create_result
 
-- name: GPO | Display GPO creation result
-  ansible.builtin.debug:
-    msg: "GPO Creation Result: {{ gpo_create.stdout }}"
-  when: 
-    - not enable_dry_run | bool
-    - server_exists | bool
-    - gpo_create is defined
-    - gpo_create.stdout is defined
-
-- name: GPO | Wait for GPO to be available
-  ansible.windows.win_shell: |
-    $GPOName = "{{ gpo_name }}"
-    $retryCount = 0
-    $maxRetries = 10
-    $GPO = $null
-    
-    do {
-        $GPO = Get-GPO -Name $GPOName -ErrorAction SilentlyContinue
-        if ($GPO) { break }
-        Start-Sleep -Seconds 3
-        $retryCount++
-    } while ($retryCount -lt $maxRetries)
-    
-    if ($GPO) {
-        Write-Output "GPO_AVAILABLE"
-    } else {
-        Write-Output "GPO_NOT_AVAILABLE"
-    }
-  register: gpo_available
-  run_once: true
-  when: 
-    - not enable_dry_run | bool
-    - server_exists | bool
-    - gpo_create is defined
-    - gpo_create.stdout is defined
-    - gpo_create.stdout != "GPO_ALREADY_EXISTS"
-
-- name: GPO | Set creation fact
-  ansible.builtin.set_fact:
-    gpo_creation:
-      stdout: "{{ 'CREATED' if gpo_create.stdout == 'GPO_CREATED' else 'EXISTS' }}"
-  when: 
-    - not enable_dry_run | bool
-    - server_exists | bool
-    - gpo_create is defined
-    - gpo_create.stdout is defined
-
-- name: GPO | Link GPO to target OU
+- name: GPO | Link GPO to Application OU
   ansible.windows.win_shell: |
     Import-Module GroupPolicy -ErrorAction Stop
     $GPOName = "{{ gpo_name }}"
     $TargetOU = "{{ target_ou_dn }}"
     
-    # Verify GPO exists
-    $GPO = Get-GPO -Name $GPOName -ErrorAction SilentlyContinue
-    if (-not $GPO) {
-        Write-Output "GPO_NOT_FOUND"
-        exit 0
-    }
+    $CurrentLinks = Get-GPInheritance -Target $TargetOU -ErrorAction SilentlyContinue
+    $AlreadyLinked = $CurrentLinks.GpoLinks | Where-Object { $_.DisplayName -eq $GPOName }
     
-    # Check if GPO is already linked
-    $GPLink = Get-GPLink -Guid $GPO.Id -Domain "{{ domain_name }}" -ErrorAction SilentlyContinue
-    if ($GPLink -and $GPLink.Target -eq $TargetOU) {
-        Write-Output "ALREADY_LINKED"
-    } else {
+    if (-not $AlreadyLinked) {
         New-GPLink -Name $GPOName -Target $TargetOU -LinkEnabled Yes
         Write-Output "LINKED"
+    } else {
+        Write-Output "ALREADY_LINKED"
     }
+  when: not enable_dry_run
   register: gpo_link_result
-  run_once: true
-  when: 
-    - not enable_dry_run | bool
-    - server_exists | bool
-    - gpo_create is defined
-    - gpo_create.stdout is defined
 
-- name: GPO | Set link fact
+- name: GPO | Set facts for GPO status (extract stdout)
   ansible.builtin.set_fact:
-    gpo_link:
-      stdout: "{{ gpo_link_result.stdout if gpo_link_result is defined and gpo_link_result.stdout is defined else 'LINK_ATTEMPTED' }}"
-  when: 
-    - not enable_dry_run | bool
-    - server_exists | bool
-
-- name: GPO | Display GPO link result
-  ansible.builtin.debug:
-    msg: "GPO Link Result: {{ gpo_link.stdout }}"
-  when: 
-    - not enable_dry_run | bool
-    - server_exists | bool
-    - gpo_link is defined
-    - gpo_link.stdout is defined
-
-- name: GPO | Fail if GPO not found
-  ansible.builtin.fail:
-    msg: |
-      ==========================================
-      ❌ GPO CREATION FAILED ❌
-      ==========================================
-      GPO '{{ gpo_name }}' could not be created.
-      
-      Please check:
-      1. Group Policy Management Console is available
-      2. You have permissions to create GPOs
-      3. SYSVOL folder is accessible
-      ==========================================
-  when: 
-    - not enable_dry_run | bool
-    - server_exists | bool
-    - gpo_link is defined
-    - gpo_link.stdout is defined
-    - gpo_link.stdout == "GPO_NOT_FOUND"
+    gpo_result: "{{ gpo_create_result.stdout | trim | default('EXISTS') }}"
+    gpo_link_result: "{{ gpo_link_result.stdout | trim | default('ALREADY_LINKED') }}"
