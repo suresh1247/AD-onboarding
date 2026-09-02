@@ -77,7 +77,7 @@
   no_log: true
   changed_when: gpo_backup.stdout == "BACKUP_CREATED"
 
-- name: RESTRICTED | Add PAM group to Administrators via GPO
+- name: RESTRICTED | Add PAM group to Administrators via GPO (Direct GPO Modification)
   ansible.windows.win_shell: |
     $GPOName = "{{ gpo_name }}"
     $DomainName = "{{ domain_name }}"
@@ -85,13 +85,19 @@
     # Add the PAM group, not individual users
     $MemberToAdd = "$DomainName\{{ ad_group_name }}"
     
+    # Get GPO ID
     $GPO = Get-GPO -Name $GPOName
     $GPOId = $GPO.Id.ToString()
+    
+    # Create the security template path
     $SecEditPath = "C:\Windows\SYSVOL\sysvol\$DomainName\Policies\{$GPOId}\Machine\Microsoft\Windows NT\SecEdit"
-    if (-not (Test-Path $SecEditPath)) { New-Item -Path $SecEditPath -ItemType Directory -Force | Out-Null }
+    if (-not (Test-Path $SecEditPath)) { 
+        New-Item -Path $SecEditPath -ItemType Directory -Force | Out-Null 
+    }
     
     $GptTmplPath = Join-Path $SecEditPath "GptTmpl.inf"
     
+    # Check if already configured
     $alreadyConfigured = $false
     if (Test-Path $GptTmplPath) {
         $Content = Get-Content $GptTmplPath -Raw
@@ -103,6 +109,7 @@
     if ($alreadyConfigured) {
         Write-Output "ALREADY_CONFIGURED"
     } else {
+        # Build the security template content
         $ContentLines = @()
         $ContentLines += '[Unicode]'
         $ContentLines += 'Unicode=yes'
@@ -112,8 +119,11 @@
         $ContentLines += '[Group Membership]'
         $ContentLines += "${GroupName}__Members = $MemberToAdd"
         $ContentLines += "${GroupName}__MemberOf = "
+        
+        # Write the security template
         $ContentLines | Set-Content -Path $GptTmplPath -Force -Encoding ASCII
         
+        # Update GPT.INI version
         $GptIniPath = "C:\Windows\SYSVOL\sysvol\$DomainName\Policies\{$GPOId}\GPT.INI"
         if (Test-Path $GptIniPath) {
             $GptIni = Get-Content $GptIniPath -Raw
@@ -122,7 +132,14 @@
                 $GptIni = $GptIni -replace "Version=$($matches[1])", "Version=$NewVersion"
                 $GptIni | Set-Content $GptIniPath -Force
             }
+        } else {
+            # Create GPT.INI if it doesn't exist
+            @"
+[General]
+Version=1
+"@ | Set-Content -Path $GptIniPath -Force
         }
+        
         Write-Output "CONFIGURED"
     }
   register: rg_result
@@ -134,13 +151,27 @@
     - gpo_ready_check.stdout is defined
     - gpo_ready_check.stdout == "GPO_READY"
 
-- name: RESTRICTED | Verify configuration
+- name: RESTRICTED | Display Restricted Group configuration result
+  ansible.builtin.debug:
+    msg: "Restricted Group Configuration: {{ rg_result.stdout }}"
+  when: 
+    - not enable_dry_run | bool
+    - server_exists | bool
+    - rg_result is defined
+    - rg_result.stdout is defined
+
+- name: RESTRICTED | Verify GptTmpl.inf was created
   ansible.windows.win_shell: |
     $GPOName = "{{ gpo_name }}"
     $DomainName = "{{ domain_name }}"
-    $GPO = Get-GPO -Name $GPOName
+    $GPO = Get-GPO -Name $GPOName -ErrorAction SilentlyContinue
+    if (-not $GPO) {
+        Write-Output "GPO_NOT_FOUND"
+        exit 0
+    }
     $GPOId = $GPO.Id.ToString()
     $GptTmplPath = "C:\Windows\SYSVOL\sysvol\$DomainName\Policies\{$GPOId}\Machine\Microsoft\Windows NT\SecEdit\GptTmpl.inf"
+    
     if (Test-Path $GptTmplPath) {
         $Content = Get-Content $GptTmplPath -Raw
         if ($Content -match "Administrators__Members.*{{ ad_group_name }}") {
@@ -156,14 +187,17 @@
   when: 
     - not enable_dry_run | bool
     - server_exists | bool
+    - rg_result is defined
+    - rg_result.stdout is defined
+    - rg_result.stdout == "CONFIGURED"
   changed_when: false
 
 - name: RESTRICTED | Set facts for reporting
   ansible.builtin.set_fact:
     restricted_group_config:
-      stdout: "{{ rg_result.stdout if rg_result is defined and rg_result.stdout is defined else 'CONFIGURED' }}"
+      stdout: "{{ rg_result.stdout if rg_result is defined and rg_result.stdout is defined else 'NOT_CONFIGURED' }}"
     verify_restricted_group:
-      stdout: "{{ verify_result.stdout if verify_result is defined and verify_result.stdout is defined else 'VERIFIED' }}"
+      stdout: "{{ verify_result.stdout if verify_result is defined and verify_result.stdout is defined else 'NOT_VERIFIED' }}"
   when: 
     - not enable_dry_run | bool
     - server_exists | bool
@@ -189,11 +223,14 @@
   ignore_errors: yes
   changed_when: false
 
-- name: RESTRICTED | Set GPUpdate fact
+- name: RESTRICTED | Set GPUpdate fact for reporting
   ansible.builtin.set_fact:
     gpupdate_result:
       stdout: "GPUPDATE_SKIPPED - GPO Configured, refresh on next cycle"
   when: 
     - not enable_dry_run | bool
     - server_exists | bool
-    - (rg_result is undefined) or (rg_result.stdout is undefined) or (rg_result.stdout != "CONFIGURED")
+    - rg_result is defined
+    - rg_result.stdout is defined
+    - rg_result.stdout == "CONFIGURED"
+    - (gpupdate_result is undefined or gpupdate_result.stdout is undefined)
