@@ -2,17 +2,17 @@
 # SECURITY NOTE: This role adds the PAM group to Administrators via GPO
 # GPO is backed up before modification
 
-- name: RESTRICTED | Wait for GPO to be created
+- name: RESTRICTED | Wait for GPO to be ready
   ansible.windows.win_shell: |
     $GPOName = "{{ gpo_name }}"
     $retryCount = 0
-    $maxRetries = 10
+    $maxRetries = 15
     $GPO = $null
     
     do {
         $GPO = Get-GPO -Name $GPOName -ErrorAction SilentlyContinue
         if ($GPO) { break }
-        Start-Sleep -Seconds 2
+        Start-Sleep -Seconds 5
         $retryCount++
     } while ($retryCount -lt $maxRetries)
     
@@ -27,12 +27,33 @@
     - not enable_dry_run | bool
     - server_exists | bool
 
-- name: RESTRICTED | Fail if GPO not ready
-  ansible.builtin.fail:
-    msg: "GPO '{{ gpo_name }}' is not ready. Please check GPO creation."
+- name: RESTRICTED | Display GPO ready status
+  ansible.builtin.debug:
+    msg: "GPO Ready Status: {{ gpo_ready_check.stdout }}"
   when: 
     - not enable_dry_run | bool
     - server_exists | bool
+    - gpo_ready_check is defined
+    - gpo_ready_check.stdout is defined
+
+- name: RESTRICTED | Fail if GPO not ready
+  ansible.builtin.fail:
+    msg: |
+      ==========================================
+      ❌ GPO NOT READY ❌
+      ==========================================
+      GPO '{{ gpo_name }}' is not ready for modification.
+      
+      Please check:
+      1. GPO was created successfully
+      2. GPO has replicated to all domain controllers
+      3. Wait a few seconds and try again
+      ==========================================
+  when: 
+    - not enable_dry_run | bool
+    - server_exists | bool
+    - gpo_ready_check is defined
+    - gpo_ready_check.stdout is defined
     - gpo_ready_check.stdout == "GPO_NOT_READY"
 
 - name: RESTRICTED | Backup GPO before modification
@@ -49,6 +70,9 @@
   when: 
     - not enable_dry_run | bool
     - server_exists | bool
+    - gpo_ready_check is defined
+    - gpo_ready_check.stdout is defined
+    - gpo_ready_check.stdout == "GPO_READY"
   no_log: true
   changed_when: gpo_backup.stdout == "BACKUP_CREATED"
 
@@ -105,6 +129,9 @@
   when: 
     - not enable_dry_run | bool
     - server_exists | bool
+    - gpo_ready_check is defined
+    - gpo_ready_check.stdout is defined
+    - gpo_ready_check.stdout == "GPO_READY"
 
 - name: RESTRICTED | Verify configuration
   ansible.windows.win_shell: |
@@ -133,9 +160,9 @@
 - name: RESTRICTED | Set facts for reporting
   ansible.builtin.set_fact:
     restricted_group_config:
-      stdout: "{{ rg_result.stdout }}"
+      stdout: "{{ rg_result.stdout if rg_result is defined and rg_result.stdout is defined else 'NOT_CONFIGURED' }}"
     verify_restricted_group:
-      stdout: "{{ verify_result.stdout }}"
+      stdout: "{{ verify_result.stdout if verify_result is defined and verify_result.stdout is defined else 'NOT_VERIFIED' }}"
   when: 
     - not enable_dry_run | bool
     - server_exists | bool
@@ -155,5 +182,8 @@
   when: 
     - not enable_dry_run | bool
     - server_exists | bool
+    - rg_result is defined
+    - rg_result.stdout is defined
+    - rg_result.stdout != "ALREADY_CONFIGURED"
   ignore_errors: yes
   changed_when: false

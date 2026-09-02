@@ -24,6 +24,7 @@
     - not enable_dry_run | bool
     - server_exists | bool
     - gpo_check is defined
+    - gpo_check.stdout is defined
 
 - name: GPO | Create new GPO
   ansible.windows.win_shell: |
@@ -99,39 +100,42 @@
     - (gpo_check is defined and gpo_check.stdout is defined and gpo_check.stdout == "GPO_EXISTS") or 
       (gpo_create is defined and gpo_create.stdout is defined and gpo_create.stdout == "GPO_CREATED")
 
-- name: GPO | Display GPO link result
-  ansible.builtin.debug:
-    msg: "GPO Link Result: {{ gpo_link_result.stdout }}"
+- name: GPO | Set link fact when GPO link was attempted
+  ansible.builtin.set_fact:
+    gpo_link:
+      stdout: "{{ gpo_link_result.stdout if gpo_link_result is defined and gpo_link_result.stdout is defined else 'NOT_ATTEMPTED' }}"
   when: 
     - not enable_dry_run | bool
     - server_exists | bool
-    - gpo_link_result is defined
-    - gpo_link_result.stdout is defined
 
 - name: GPO | Fail if GPO not found for linking
   ansible.builtin.fail:
-    msg: "GPO '{{ gpo_name }}' was not found. Please check GPO creation."
+    msg: |
+      ==========================================
+      ❌ GPO NOT FOUND ❌
+      ==========================================
+      GPO '{{ gpo_name }}' was not found.
+      
+      This could mean:
+      1. GPO creation failed
+      2. GPO was created but not yet replicated
+      3. Insufficient permissions to read GPO
+      
+      Please check GPO creation manually on the domain controller.
+      ==========================================
   when: 
     - not enable_dry_run | bool
     - server_exists | bool
-    - gpo_link_result is defined
-    - gpo_link_result.stdout == "GPO_NOT_FOUND"
+    - gpo_link is defined
+    - gpo_link.stdout is defined
+    - gpo_link.stdout == "GPO_NOT_FOUND"
 
-- name: GPO | Set link fact default
-  ansible.builtin.set_fact:
-    gpo_link:
-      stdout: "ALREADY_LINKED"
+- name: GPO | Display GPO link result
+  ansible.builtin.debug:
+    msg: "GPO Link Result: {{ gpo_link.stdout }}"
   when: 
     - not enable_dry_run | bool
     - server_exists | bool
-    - gpo_link_result is not defined
-
-- name: GPO | Set link fact from result
-  ansible.builtin.set_fact:
-    gpo_link:
-      stdout: "{{ gpo_link_result.stdout }}"
-  when: 
-    - not enable_dry_run | bool
-    - server_exists | bool
-    - gpo_link_result is defined
-    - gpo_link_result.stdout is defined
+    - gpo_link is defined
+    - gpo_link.stdout is defined
+    - gpo_link.stdout != "GPO_NOT_FOUND"
