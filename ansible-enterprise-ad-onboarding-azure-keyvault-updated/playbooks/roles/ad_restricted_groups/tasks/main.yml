@@ -2,6 +2,39 @@
 # SECURITY NOTE: This role adds the PAM group to Administrators via GPO
 # GPO is backed up before modification
 
+- name: RESTRICTED | Wait for GPO to be created
+  ansible.windows.win_shell: |
+    $GPOName = "{{ gpo_name }}"
+    $retryCount = 0
+    $maxRetries = 10
+    $GPO = $null
+    
+    do {
+        $GPO = Get-GPO -Name $GPOName -ErrorAction SilentlyContinue
+        if ($GPO) { break }
+        Start-Sleep -Seconds 2
+        $retryCount++
+    } while ($retryCount -lt $maxRetries)
+    
+    if ($GPO) {
+        Write-Output "GPO_READY"
+    } else {
+        Write-Output "GPO_NOT_READY"
+    }
+  register: gpo_ready_check
+  run_once: true
+  when: 
+    - not enable_dry_run | bool
+    - server_exists | bool
+
+- name: RESTRICTED | Fail if GPO not ready
+  ansible.builtin.fail:
+    msg: "GPO '{{ gpo_name }}' is not ready. Please check GPO creation."
+  when: 
+    - not enable_dry_run | bool
+    - server_exists | bool
+    - gpo_ready_check.stdout == "GPO_NOT_READY"
+
 - name: RESTRICTED | Backup GPO before modification
   ansible.windows.win_shell: |
     $GPOName = "{{ gpo_name }}"
