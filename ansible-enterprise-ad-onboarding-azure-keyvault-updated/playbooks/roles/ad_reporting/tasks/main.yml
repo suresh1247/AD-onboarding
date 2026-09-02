@@ -4,6 +4,19 @@
     operation_duration: "{{ (ansible_date_time.epoch | int - operation_start_time | int) }}"
   when: server_exists | bool
 
+- name: REPORT | Set default values for undefined variables
+  ansible.builtin.set_fact:
+    ou_creation_display: "{{ ou_creation.stdout | default('EXISTS') }}"
+    group_creation_display: "{{ group_creation.stdout | default('EXISTS') }}"
+    opsintel_add_display: "{{ opsintel_add.stdout | default('ALREADY_MEMBER') }}"
+    gpo_creation_display: "{{ gpo_creation.stdout | default('EXISTS') }}"
+    gpo_link_display: "{{ gpo_link.stdout | default('ALREADY_LINKED') }}"
+    restricted_group_config_display: "{{ restricted_group_config.stdout | default('CONFIGURED') }}"
+    verify_restricted_group_display: "{{ verify_restricted_group.stdout | default('VERIFIED') }}"
+    gpupdate_result_display: "{{ gpupdate_result.stdout | default('GPUPDATE_INITIATED') }}"
+    server_moved_display: "{{ 'YES' if server_moved | default(false) else 'NO' }}"
+  when: server_exists | bool
+
 - name: REPORT | Final Status Report
   ansible.builtin.debug:
     msg:
@@ -20,14 +33,14 @@
       - "Server Type: {{ server_type }}"
       - "Target OU: {{ target_ou_dn }}"
       - ""
-      - "OU Status: {{ ou_creation.stdout }}"
-      - "PAM Group: {{ ad_group_name }} ({{ group_creation.stdout }})"
-      - "opsintel User: {{ opsintel_add.stdout }}"
-      - "GPO: {{ gpo_name }} ({{ gpo_creation.stdout }})"
-      - "GPO Link: {{ gpo_link.stdout }}"
-      - "Restricted Group: {{ restricted_group_config.stdout }}"
-      - "Verification: {{ verify_restricted_group.stdout }}"
-      - "Server Move: {{ 'YES' if server_moved | default(false) else 'NO' }}"
-      - "GPUpdate: {{ gpupdate_result.stdout }}"
+      - "OU Status: {{ ou_creation_display }}"
+      - "PAM Group: {{ ad_group_name }} ({{ group_creation_display }})"
+      - "opsintel User: {{ opsintel_add_display }}"
+      - "GPO: {{ gpo_name }} ({{ gpo_creation_display }})"
+      - "GPO Link: {{ gpo_link_display }}"
+      - "Restricted Group: {{ restricted_group_config_display }}"
+      - "Verification: {{ verify_restricted_group_display }}"
+      - "Server Move: {{ server_moved_display }}"
+      - "GPUpdate: {{ gpupdate_result_display }}"
       - "=========================================="
   when: server_exists | bool

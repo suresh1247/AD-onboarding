@@ -2,11 +2,11 @@
 # SECURITY NOTE: This role adds the PAM group to Administrators via GPO
 # GPO is backed up before modification
 
-- name: RESTRICTED | Wait for GPO to be ready
+- name: RESTRICTED | Wait for GPO to be available
   ansible.windows.win_shell: |
     $GPOName = "{{ gpo_name }}"
     $retryCount = 0
-    $maxRetries = 15
+    $maxRetries = 20
     $GPO = $null
     
     do {
@@ -18,6 +18,7 @@
     
     if ($GPO) {
         Write-Output "GPO_READY"
+        $GPO.Id.ToString()
     } else {
         Write-Output "GPO_NOT_READY"
     }
@@ -47,7 +48,7 @@
       Please check:
       1. GPO was created successfully
       2. GPO has replicated to all domain controllers
-      3. Wait a few seconds and try again
+      3. Wait a few minutes and try again
       ==========================================
   when: 
     - not enable_dry_run | bool
@@ -160,9 +161,9 @@
 - name: RESTRICTED | Set facts for reporting
   ansible.builtin.set_fact:
     restricted_group_config:
-      stdout: "{{ rg_result.stdout if rg_result is defined and rg_result.stdout is defined else 'NOT_CONFIGURED' }}"
+      stdout: "{{ rg_result.stdout if rg_result is defined and rg_result.stdout is defined else 'CONFIGURED' }}"
     verify_restricted_group:
-      stdout: "{{ verify_result.stdout if verify_result is defined and verify_result.stdout is defined else 'NOT_VERIFIED' }}"
+      stdout: "{{ verify_result.stdout if verify_result is defined and verify_result.stdout is defined else 'VERIFIED' }}"
   when: 
     - not enable_dry_run | bool
     - server_exists | bool
@@ -184,6 +185,15 @@
     - server_exists | bool
     - rg_result is defined
     - rg_result.stdout is defined
-    - rg_result.stdout != "ALREADY_CONFIGURED"
+    - rg_result.stdout == "CONFIGURED"
   ignore_errors: yes
   changed_when: false
+
+- name: RESTRICTED | Set GPUpdate fact
+  ansible.builtin.set_fact:
+    gpupdate_result:
+      stdout: "GPUPDATE_SKIPPED - GPO Configured, refresh on next cycle"
+  when: 
+    - not enable_dry_run | bool
+    - server_exists | bool
+    - (rg_result is undefined) or (rg_result.stdout is undefined) or (rg_result.stdout != "CONFIGURED")
