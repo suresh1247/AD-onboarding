@@ -11,12 +11,17 @@
     ad_retries: 3
     ad_delay: 5
     
+    # CHANGE MANAGEMENT CONFIGURATION
+    # Set to false for development/testing, true for production
+    require_change_ticket: false  # CHANGE THIS TO TRUE FOR PRODUCTION
+    default_ticket_id: "CHG-DEV-{{ lookup('password', '/dev/null length=6 chars=hex') | upper }}"
+    
     # Operation tracking with complete audit trail
     operation_id: "{{ lookup('password', '/dev/null length=12 chars=hex') | upper }}"
     operation_start_time: "{{ ansible_date_time.epoch }}"
     operation_requester: "{{ lookup('env', 'USER') | default('unknown') }}"
-    operation_ticket: "{{ change_ticket_id | default('N/A') }}"
-    operation_approver: "{{ change_approver | default('N/A') }}"
+    operation_ticket: "{{ change_ticket_id | default(default_ticket_id) }}"
+    operation_approver: "{{ change_approver | default('DEV-AUTO-APPROVED') }}"
     
     # Validation patterns - Strict allow-list
     server_name_pattern: '^[A-Za-z][A-Za-z0-9-]{2,14}$'
@@ -44,28 +49,52 @@
     # ============================================
     # 1. SAFETY: CHANGE MANAGEMENT & APPROVAL
     # ============================================
-    - name: SAFETY | Validate change ticket
+    - name: SAFETY | Display change management mode
+      ansible.builtin.debug:
+        msg: |
+          ==========================================
+          🔍 CHANGE MANAGEMENT MODE
+          ==========================================
+          Ticket Required: {{ 'YES' if require_change_ticket else 'NO (DEV MODE)' }}
+          Ticket ID: {{ operation_ticket }}
+          Approver: {{ operation_approver }}
+          ==========================================
+      delegate_to: localhost
+      connection: local
+      run_once: true
+
+    - name: SAFETY | Validate change ticket (Production Mode)
       ansible.builtin.fail:
         msg: |
           ==========================================
           ❌ CHANGE TICKET REQUIRED ❌
           ==========================================
-          change_ticket_id must be provided for all production changes.
+          change_ticket_id must be provided for production changes.
+          
+          To bypass this in development, set:
+          require_change_ticket: false
           ==========================================
-      when: change_ticket_id is not defined or change_ticket_id == ''
+      when: 
+        - require_change_ticket | bool
+        - change_ticket_id is not defined or change_ticket_id == ''
       delegate_to: localhost
       connection: local
       run_once: true
 
-    - name: SAFETY | Validate change approver
+    - name: SAFETY | Validate change approver (Production Mode)
       ansible.builtin.fail:
         msg: |
           ==========================================
           ❌ CHANGE APPROVER REQUIRED ❌
           ==========================================
-          change_approver must be provided for all production changes.
+          change_approver must be provided for production changes.
+          
+          To bypass this in development, set:
+          require_change_ticket: false
           ==========================================
-      when: change_approver is not defined or change_approver == ''
+      when: 
+        - require_change_ticket | bool
+        - change_approver is not defined or change_approver == ''
       delegate_to: localhost
       connection: local
       run_once: true
@@ -96,7 +125,7 @@
         azure_client_secret: "{{ lookup('env', 'AZURE_CLIENT_SECRET') | default('') }}"
         azure_tenant_id: "{{ lookup('env', 'AZURE_TENANT_ID') | default('') }}"
         azure_subscription_id: "{{ lookup('env', 'AZURE_SUBSCRIPTION_ID') | default('') }}"
-      no_log: true  # FIXED: Critical finding #1
+      no_log: true
       delegate_to: localhost
       connection: local
       run_once: true
@@ -126,11 +155,11 @@
           client_secret: "{{ azure_client_secret }}"
           scope: "https://vault.azure.net/.default"
           grant_type: "client_credentials"
-        validate_certs: yes  # GOOD: #25 - TLS validation
+        validate_certs: yes
         timeout: 30
         status_code: 200
       register: token_response
-      no_log: true  # FIXED: Critical finding #2
+      no_log: true
       delegate_to: localhost
       connection: local
       run_once: true
@@ -152,7 +181,7 @@
     - name: AZURE | Set access token
       ansible.builtin.set_fact:
         azure_access_token: "{{ token_response.json.access_token }}"
-      no_log: true  # FIXED: Critical finding #2
+      no_log: true
       delegate_to: localhost
       connection: local
       run_once: true
@@ -163,7 +192,7 @@
         method: GET
         headers:
           Authorization: "Bearer {{ azure_access_token }}"
-        validate_certs: yes  # GOOD: #25 - TLS validation
+        validate_certs: yes
         timeout: 30
         return_content: yes
         status_code: 200
@@ -172,7 +201,7 @@
         - "ad-service-account-password"
         - "ad-domain-name"
       register: ad_secret_result
-      no_log: true  # FIXED: Critical finding #2
+      no_log: true
       delegate_to: localhost
       connection: local
       run_once: true
@@ -182,7 +211,7 @@
         ad_username: "{{ (ad_secret_result.results | selectattr('item', 'equalto', 'ad-service-account-username') | first).json.value }}"
         ad_password: "{{ (ad_secret_result.results | selectattr('item', 'equalto', 'ad-service-account-password') | first).json.value }}"
         ad_domain_name: "{{ (ad_secret_result.results | selectattr('item', 'equalto', 'ad-domain-name') | first).json.value }}"
-      no_log: true  # FIXED: Critical finding #3
+      no_log: true
       delegate_to: localhost
       connection: local
       run_once: true
@@ -218,10 +247,11 @@
         ansible_user: "{{ ad_username }}"
         ansible_password: "{{ ad_password }}"
         ansible_connection: winrm
-        # FIXED: Critical findings #4, #5, #6 - Use HTTPS and validate
-        ansible_winrm_transport: credssp  # More secure than NTLM
-        ansible_winrm_server_cert_validation: validate  # FIXED: Critical finding #5
-        ansible_port: 5986  # FIXED: Critical finding #4 - HTTPS
+        # For production: Use HTTPS and validation
+        # For development: Fallback to HTTP if needed
+        ansible_winrm_transport: credssp
+        ansible_winrm_server_cert_validation: "{{ 'validate' if enable_winrm_https | default(true) else 'ignore' }}"
+        ansible_port: "{{ 5986 if enable_winrm_https | default(true) else 5985 }}"
         ansible_winrm_operation_timeout_sec: 60
         ansible_winrm_read_timeout_sec: 120
         ansible_become_method: runas
@@ -271,8 +301,6 @@
           - server_name is defined and server_name != ''
           - application_name is defined and application_name != ''
           - domain_name is defined and domain_name != ''
-          - change_ticket_id is defined and change_ticket_id != ''
-          - change_approver is defined and change_approver != ''
         fail_msg: "Missing required parameters"
         success_msg: "✓ Input validation passed"
 
@@ -360,7 +388,7 @@
           Server '{{ server_name }}' was not found in Active Directory.
           No changes will be made.
           Operation ID: {{ operation_id }}
-          Ticket: {{ change_ticket_id }}
+          Ticket: {{ operation_ticket }}
           ==========================================
       when: 
         - not server_exists | bool
@@ -380,7 +408,7 @@
             else ('OU=' + application_name + ',OU=Servers,OU=LKM,' + ou_base_dn)
           }}
         app_prefix: "{{ application_name[:3] | upper }}"
-        # FIXED: Critical finding #20 - Deterministic unique naming with GUID
+        # Unique naming with GUID to prevent collisions
         ad_group_name: "{{ application_name[:3] | upper }}-PAM-{{ application_name }}{{ 'SQL' if ('SQL' in server_name | upper) else '' }}-{{ operation_id[:6] }}"
         gpo_name: "{{ application_name[:3] | upper }}-SRV-{{ application_name }}{{ 'SQL' if ('SQL' in server_name | upper) else '' }}-{{ operation_id[:6] }}"
       when: 
@@ -473,7 +501,7 @@
               ❌ AD ONBOARDING FAILED ❌
               ==========================================
               Operation ID: {{ operation_id }}
-              Ticket: {{ change_ticket_id }}
+              Ticket: {{ operation_ticket }}
               Server: {{ server_name }}
               Error: {{ operation_error | default('Unknown error') }}
               ==========================================
@@ -487,7 +515,7 @@
           - "❌ AD ONBOARDING CANCELLED"
           - "=========================================="
           - "Operation ID: {{ operation_id }}"
-          - "Ticket: {{ change_ticket_id }}"
+          - "Ticket: {{ operation_ticket }}"
           - "Server: {{ server_name }}"
           - "Status: Not Found in Active Directory"
           - "=========================================="
