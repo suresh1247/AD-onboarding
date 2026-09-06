@@ -1,0 +1,31 @@
+---
+- name: SERVER | Check if server exists in AD
+  ansible.windows.win_shell: |
+    Import-Module ActiveDirectory -ErrorAction SilentlyContinue
+    $Computer = Get-ADComputer -Filter "Name -eq '{{ server_name }}'" -Properties DistinguishedName, CanonicalName, Enabled -ErrorAction SilentlyContinue
+    if ($Computer) {
+        $Result = @{
+            Exists = $true
+            DN = $Computer.DistinguishedName
+            CanonicalName = $Computer.CanonicalName
+            Enabled = $Computer.Enabled
+        }
+        $Result | ConvertTo-Json
+    } else {
+        '{"Exists": false}'
+    }
+  register: server_search
+  changed_when: false
+  when: server_exists | bool
+
+- name: SERVER | Parse server info
+  ansible.builtin.set_fact:
+    server_exists: "{{ (server_search.stdout | from_json).Exists | default(false) }}"
+    server_canonical: "{{ (server_search.stdout | from_json).CanonicalName | default('N/A') }}"
+    server_enabled: "{{ (server_search.stdout | from_json).Enabled | default(false) }}"
+  when: server_exists | bool
+
+- name: SERVER | Fail if server not found
+  ansible.builtin.fail:
+    msg: "Server '{{ server_name }}' not found in Active Directory"
+  when: not server_exists | bool

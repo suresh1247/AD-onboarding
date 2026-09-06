@@ -1,0 +1,12 @@
+---
+- name: VALIDATION | Verify server exists
+  ansible.builtin.assert:
+    that:
+      - server_exists | bool
+    fail_msg: |
+      ==========================================
+      ❌ SERVER NOT FOUND ❌
+      ==========================================
+      Server '{{ server_name }}' was not found in Active Directory.
+      ==========================================
+    success_msg: "✓ Server found in Active Directory"
