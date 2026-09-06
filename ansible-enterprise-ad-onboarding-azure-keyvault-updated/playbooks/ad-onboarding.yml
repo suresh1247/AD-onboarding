@@ -12,9 +12,16 @@
     ad_delay: 5
     
     # CHANGE MANAGEMENT CONFIGURATION
-    # Set to false for development/testing, true for production
-    require_change_ticket: false  # CHANGE THIS TO TRUE FOR PRODUCTION
+    require_change_ticket: false  # Set to true for production
     default_ticket_id: "CHG-DEV-{{ lookup('password', '/dev/null length=6 chars=hex') | upper }}"
+    
+    # WINRM CONFIGURATION
+    # For development: Use HTTP (port 5985)
+    # For production: Use HTTPS (port 5986) with validation
+    enable_winrm_https: false  # Set to true for production when HTTPS is configured
+    winrm_port: "{{ 5986 if enable_winrm_https else 5985 }}"
+    winrm_transport: "{{ 'credssp' if enable_winrm_https else 'ntlm' }}"
+    winrm_cert_validation: "{{ 'validate' if enable_winrm_https else 'ignore' }}"
     
     # Operation tracking with complete audit trail
     operation_id: "{{ lookup('password', '/dev/null length=12 chars=hex') | upper }}"
@@ -63,6 +70,21 @@
       connection: local
       run_once: true
 
+    - name: SAFETY | Display WinRM configuration
+      ansible.builtin.debug:
+        msg: |
+          ==========================================
+          🔍 WINRM CONFIGURATION
+          ==========================================
+          Port: {{ winrm_port }}
+          Transport: {{ winrm_transport }}
+          Cert Validation: {{ winrm_cert_validation }}
+          HTTPS Enabled: {{ 'YES' if enable_winrm_https else 'NO' }}
+          ==========================================
+      delegate_to: localhost
+      connection: local
+      run_once: true
+
     - name: SAFETY | Validate change ticket (Production Mode)
       ansible.builtin.fail:
         msg: |
@@ -70,9 +92,6 @@
           ❌ CHANGE TICKET REQUIRED ❌
           ==========================================
           change_ticket_id must be provided for production changes.
-          
-          To bypass this in development, set:
-          require_change_ticket: false
           ==========================================
       when: 
         - require_change_ticket | bool
@@ -88,9 +107,6 @@
           ❌ CHANGE APPROVER REQUIRED ❌
           ==========================================
           change_approver must be provided for production changes.
-          
-          To bypass this in development, set:
-          require_change_ticket: false
           ==========================================
       when: 
         - require_change_ticket | bool
@@ -240,23 +256,57 @@
       run_once: true
 
     # ============================================
-    # 3. WINRM - SECURE CONNECTION
+    # 3. WINRM - CONNECTION SETUP (with fallback)
     # ============================================
-    - name: CONNECTION | Set secure WinRM variables
+    - name: CONNECTION | Set WinRM variables
       ansible.builtin.set_fact:
         ansible_user: "{{ ad_username }}"
         ansible_password: "{{ ad_password }}"
         ansible_connection: winrm
-        # For production: Use HTTPS and validation
-        # For development: Fallback to HTTP if needed
-        ansible_winrm_transport: credssp
-        ansible_winrm_server_cert_validation: "{{ 'validate' if enable_winrm_https | default(true) else 'ignore' }}"
-        ansible_port: "{{ 5986 if enable_winrm_https | default(true) else 5985 }}"
+        ansible_winrm_transport: "{{ winrm_transport }}"
+        ansible_winrm_server_cert_validation: "{{ winrm_cert_validation }}"
+        ansible_port: "{{ winrm_port }}"
         ansible_winrm_operation_timeout_sec: 60
         ansible_winrm_read_timeout_sec: 120
         ansible_become_method: runas
         ansible_become_user: SYSTEM
       no_log: true
+      when: 
+        - ad_username is defined and ad_username != ''
+        - ad_password is defined and ad_password != ''
+
+    - name: CONNECTION | Try HTTPS connection (with fallback to HTTP)
+      block:
+        - name: CONNECTION | Attempt HTTPS connection
+          ansible.builtin.setup:
+            gather_subset:
+              - min
+          when: enable_winrm_https | bool
+          ignore_errors: yes
+          register: https_connection
+
+        - name: CONNECTION | Fallback to HTTP if HTTPS fails
+          ansible.builtin.set_fact:
+            ansible_port: 5985
+            ansible_winrm_transport: ntlm
+            ansible_winrm_server_cert_validation: ignore
+          when: 
+            - enable_winrm_https | bool
+            - https_connection is defined
+            - https_connection.failed is defined
+            - https_connection.failed
+          no_log: true
+
+        - name: CONNECTION | Retry with HTTP fallback
+          ansible.builtin.setup:
+            gather_subset:
+              - min
+          when: 
+            - enable_winrm_https | bool
+            - https_connection is defined
+            - https_connection.failed is defined
+            - https_connection.failed
+
       when: 
         - ad_username is defined and ad_username != ''
         - ad_password is defined and ad_password != ''
@@ -408,7 +458,6 @@
             else ('OU=' + application_name + ',OU=Servers,OU=LKM,' + ou_base_dn)
           }}
         app_prefix: "{{ application_name[:3] | upper }}"
-        # Unique naming with GUID to prevent collisions
         ad_group_name: "{{ application_name[:3] | upper }}-PAM-{{ application_name }}{{ 'SQL' if ('SQL' in server_name | upper) else '' }}-{{ operation_id[:6] }}"
         gpo_name: "{{ application_name[:3] | upper }}-SRV-{{ application_name }}{{ 'SQL' if ('SQL' in server_name | upper) else '' }}-{{ operation_id[:6] }}"
       when: 
